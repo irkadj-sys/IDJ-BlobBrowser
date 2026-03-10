@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IDJ Blob Browser</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --line: #d7dce6;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --brand: #0e7490;
+    }
+    body { margin: 0; font-family: Segoe UI, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    h1 { margin: 0 0 10px 0; font-size: 24px; }
+    .muted { color: var(--muted); }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input[type="text"], input[type="file"] { padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
+    button { background: var(--brand); color: white; border: 0; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+    .thumb { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 6px; }
+    .thumb img { width: 100%; height: 120px; object-fit: cover; border-radius: 6px; }
+    .thumb .name { font-size: 12px; margin-top: 6px; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>IDJ Blob Browser</h1>
+      <div id="user" class="muted">Loading user...</div>
+    </div>
+
+    <div class="card">
+      <h3>Upload File</h3>
+      <form id="uploadForm" class="row">
+        <input type="file" id="fileInput" required />
+        <input type="text" id="folderInput" placeholder="Optional folder (e.g. photos/2026)" />
+        <button type="submit">Upload</button>
+      </form>
+      <div id="uploadStatus" class="muted" style="margin-top: 8px;"></div>
+    </div>
+
+    <div class="card">
+      <h3>Browse Files</h3>
+      <div class="row" style="margin-bottom: 10px;">
+        <input type="text" id="prefixInput" placeholder="Prefix filter (optional)" />
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
+      <div id="count" class="muted"></div>
+      <table id="fileTable">
+        <thead>
+          <tr><th>Name</th><th>Size</th><th>Type</th><th>Modified (UTC)</th><th>Open</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>Image Gallery</h3>
+      <div id="imageGrid" class="grid"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
