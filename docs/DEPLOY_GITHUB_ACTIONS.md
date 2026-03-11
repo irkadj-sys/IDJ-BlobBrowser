@@ -44,13 +44,27 @@ In GitHub repo settings:
 
 ### Repository Variables
 - `AZURE_WEBAPP_NAME` = `<your-app-service-name>`
+- `AZURE_RESOURCE_GROUP` = `<your-resource-group-name>`
 
 ### Repository Secrets
-- `AZURE_WEBAPP_PUBLISH_PROFILE` = publish profile XML from Azure App Service
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
 
-How to get publish profile:
-- Azure Portal -> App Service -> Overview -> **Get publish profile**
-- Copy full XML into the GitHub secret value.
+These are used for OIDC login (no publish profile needed, Basic Auth can stay disabled).
+
+### One-time Azure setup for OIDC
+1. Create Entra App Registration for GitHub Actions deployment.
+2. Add Federated credential:
+   - Issuer: `https://token.actions.githubusercontent.com`
+   - Organization/Repo/Branch: your repo + `main`
+3. On the Resource Group (or Web App scope), assign role to this app registration:
+   - `Website Contributor` (minimum practical for web deploy)
+   - `Reader` if needed for extra lookup operations
+4. Copy IDs into GitHub secrets:
+   - App (client) ID -> `AZURE_CLIENT_ID`
+   - Tenant ID -> `AZURE_TENANT_ID`
+   - Subscription ID -> `AZURE_SUBSCRIPTION_ID`
 
 ## 6) Deploy
 
