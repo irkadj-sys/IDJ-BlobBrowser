@@ -19,15 +19,25 @@
     h1 { margin: 0 0 10px 0; font-size: 24px; }
     .muted { color: var(--muted); }
     .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    input[type="text"], input[type="file"] { padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
+    input[type="text"], input[type="file"], select { padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
     button { background: var(--brand); color: white; border: 0; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
+    .browser-split { display: grid; grid-template-columns: 220px 1fr; gap: 12px; align-items: start; }
+    .folder-pane { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #fbfdff; min-height: 320px; }
+    .folder-list { display: flex; flex-direction: column; gap: 6px; }
+    .folder-btn { width: 100%; text-align: left; background: white; color: var(--text); border: 1px solid var(--line); }
+    .folder-btn.active { background: #e0f2fe; border-color: #7dd3fc; }
+    .file-pane { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; overflow: auto; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
     .thumb { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 6px; }
     .thumb img { width: 100%; height: 120px; object-fit: cover; border-radius: 6px; }
     .thumb .name { font-size: 12px; margin-top: 6px; word-break: break-all; }
+    @media (max-width: 900px) {
+      .browser-split { grid-template-columns: 1fr; }
+      .folder-pane { min-height: auto; }
+    }
   </style>
 </head>
 <body>
@@ -38,10 +48,10 @@
     </div>
 
     <div class="card">
-      <h3>Upload File</h3>
+      <h3>Upload Files</h3>
       <form id="uploadForm" class="row">
-        <input type="file" id="fileInput" required />
-        <input type="text" id="folderInput" placeholder="Optional folder (e.g. photos/2026)" />
+        <input type="file" id="fileInput" multiple required />
+        <select id="uploadFolderSelect" required></select>
         <button type="submit">Upload</button>
       </form>
       <div id="uploadStatus" class="muted" style="margin-top: 8px;"></div>
@@ -50,20 +60,37 @@
     <div class="card">
       <h3>Browse Files</h3>
       <div class="row" style="margin-bottom: 10px;">
-        <input type="text" id="prefixInput" placeholder="Prefix filter (optional)" />
         <button id="refreshBtn" type="button">Refresh</button>
       </div>
-      <div id="count" class="muted"></div>
-      <table id="fileTable">
-        <thead>
-          <tr><th>Name</th><th>Size</th><th>Type</th><th>Modified (UTC)</th><th>Open</th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
+      <div class="browser-split">
+        <div class="folder-pane">
+          <div class="muted" style="margin-bottom: 8px;">Folders</div>
+          <div id="folderList" class="folder-list"></div>
+          <div id="folderEmpty" class="muted" style="display: none;">No visible folders.</div>
+        </div>
+        <div class="file-pane">
+          <div id="count" class="muted" style="margin-bottom: 8px;"></div>
+          <table id="fileTable">
+            <thead>
+              <tr><th>Name</th><th>Size</th><th>Type</th><th>Modified (UTC)</th><th>Open</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <div class="card">
       <h3>Image Gallery</h3>
+      <div class="row" style="margin-bottom: 10px;">
+        <label for="galleryLimit" class="muted">Show recent</label>
+        <select id="galleryLimit">
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+        </select>
+      </div>
       <div id="imageGrid" class="grid"></div>
     </div>
   </div>

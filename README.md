@@ -4,15 +4,19 @@ Private family file manager for Azure Blob Storage.
 
 ## Scope (v1)
 - Secure sign-in with Microsoft Entra ID (manual allow-list access)
-- Upload files to a private Azure Blob container
-- Browse files
-- View images in browser
+- Upload multiple files to a private Azure Blob container
+- Folder-based browsing (left pane folders, right pane files)
+- Image gallery with recent-file limit selector (5/10/25/50)
 
 ## Security model (simple + secure)
 - App Service Authentication (Easy Auth) with Microsoft Entra ID
 - Blob container remains private (no anonymous access)
 - App uses Managed Identity to access Blob Storage
 - Optional app-level email allow-list via `ALLOWED_USER_EMAILS`
+- Non-admin users:
+  - Read: `<username>/` and `shared/`
+  - Upload: only `<username>/`
+- Admin users (`ADMIN_USER_EMAILS`) can read/upload all folders
 
 ## Run locally
 
@@ -46,6 +50,8 @@ Open http://localhost:8000
 
 ## Optional environment variables
 - `ALLOWED_USER_EMAILS` comma-separated emails for explicit app allow-list
+- `ADMIN_USER_EMAILS` comma-separated emails with admin access
+- `SHARED_FOLDER_NAME` shared folder name (default `shared`)
 - `LOCAL_DEV_USER_EMAIL` only for local testing when Easy Auth header is unavailable
 - `MAX_UPLOAD_MB` upload limit (default `50`)
 
