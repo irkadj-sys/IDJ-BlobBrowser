@@ -15,7 +15,7 @@ Private family file manager for Azure Blob Storage.
 - Optional app-level email allow-list via `ALLOWED_USER_EMAILS`
 - Non-admin users:
   - Read: `<username>/` and `shared/`
-  - Upload: only `<username>/`
+  - Upload: `<username>/` and `shared/`
 - Admin users (`ADMIN_USER_EMAILS`) can read/upload all folders
 
 ## Run locally

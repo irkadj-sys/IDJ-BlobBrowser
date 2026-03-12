@@ -93,7 +93,7 @@ def _access_scope(user: Dict[str, str]) -> Dict[str, Any]:
     admin = _is_admin(email)
 
     readable_folders = [] if admin else [own_folder, shared_folder]
-    writable_folders = [] if admin else [own_folder]
+    writable_folders = [] if admin else [own_folder, shared_folder]
     return {
         "is_admin": admin,
         "own_folder": own_folder,
@@ -304,7 +304,7 @@ async def upload_file(
     if not upload_folder:
         raise HTTPException(status_code=400, detail="Folder is required")
     if not _can_write_folder(scope, upload_folder):
-        raise HTTPException(status_code=403, detail="You can only upload to your own folder")
+        raise HTTPException(status_code=403, detail="You can only upload to your own folder or shared folder")
 
     max_mb = int(_env("MAX_UPLOAD_MB", "50") or "50")
     container = _container_client()
