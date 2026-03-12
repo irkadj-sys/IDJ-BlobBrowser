@@ -29,7 +29,10 @@
     .folder-list { display: flex; flex-direction: column; gap: 6px; }
     .folder-btn { width: 100%; text-align: left; background: white; color: var(--text); border: 1px solid var(--line); }
     .folder-btn.active { background: #e0f2fe; border-color: #7dd3fc; }
+    .folder-btn.drop-target { border-color: #0e7490; background: #cffafe; }
     .file-pane { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; overflow: auto; }
+    .file-row { cursor: grab; }
+    .file-row.dragging { opacity: 0.55; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
     .thumb { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 6px; }
     .thumb img { width: 100%; height: 120px; object-fit: cover; border-radius: 6px; }
@@ -70,6 +73,7 @@
         </div>
         <div class="file-pane">
           <div id="count" class="muted" style="margin-bottom: 8px;"></div>
+          <div id="moveStatus" class="muted" style="margin-bottom: 8px;"></div>
           <table id="fileTable">
             <thead>
               <tr><th>Name</th><th>Size</th><th>Type</th><th>Modified (UTC)</th><th>Open</th></tr>

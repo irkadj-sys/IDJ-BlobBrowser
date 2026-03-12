@@ -14,6 +14,10 @@ function encodePath(path) {
   return path.split('/').map(encodeURIComponent).join('/');
 }
 
+function normalizePath(path) {
+  return String(path || "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -23,19 +27,39 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+const ALL_FILES_KEY = "__all__";
+
 const state = {
   me: null,
   folders: [],
   currentFolder: "",
   galleryLimit: 5,
   files: [],
+  dragBlobPath: "",
 };
 
 function shortName(fullName, folder) {
-  if (!folder) return fullName;
+  if (!folder || folder === ALL_FILES_KEY) return fullName;
   const prefix = `${folder}/`;
   if (!fullName.startsWith(prefix)) return fullName;
   return fullName.slice(prefix.length);
+}
+
+function folderLabel(folder) {
+  return folder.label || folder.name;
+}
+
+function clearDropTargets() {
+  for (const btn of document.querySelectorAll('.folder-btn.drop-target')) {
+    btn.classList.remove('drop-target');
+  }
+}
+
+function setMoveStatus(message, isError = false) {
+  const el = document.getElementById('moveStatus');
+  if (!el) return;
+  el.textContent = message;
+  el.style.color = isError ? '#b91c1c' : '';
 }
 
 async function loadMe() {
@@ -68,7 +92,7 @@ function renderFolderList() {
       btn.classList.add('active');
     }
     btn.dataset.folder = folder.name;
-    btn.textContent = folder.name;
+    btn.textContent = folderLabel(folder);
     list.appendChild(btn);
   }
 }
@@ -77,11 +101,11 @@ function renderUploadFolders() {
   const select = document.getElementById('uploadFolderSelect');
   select.innerHTML = '';
 
-  const uploadable = state.folders.filter((folder) => folder.can_upload);
+  const uploadable = state.folders.filter((folder) => folder.can_upload && folder.name !== ALL_FILES_KEY);
   for (const folder of uploadable) {
     const option = document.createElement('option');
     option.value = folder.name;
-    option.textContent = folder.name;
+    option.textContent = folderLabel(folder);
     if (folder.name === state.currentFolder) {
       option.selected = true;
     }
@@ -105,6 +129,9 @@ async function loadFolders() {
 
   const data = await res.json();
   state.folders = data.items || [];
+  if (state.me?.is_admin) {
+    state.folders = [{ name: ALL_FILES_KEY, label: "(all files)", can_upload: false }, ...state.folders];
+  }
   const currentExists = state.folders.some((folder) => folder.name === state.currentFolder);
   if (!currentExists) {
     state.currentFolder = "";
@@ -145,7 +172,9 @@ async function loadFiles() {
     return;
   }
 
-  const res = await fetch(`/api/files?prefix=${encodeURIComponent(prefix)}`);
+  const loadAll = prefix === ALL_FILES_KEY;
+  const url = loadAll ? '/api/files' : `/api/files?prefix=${encodeURIComponent(prefix)}`;
+  const res = await fetch(url);
   const tbody = document.querySelector('#fileTable tbody');
   const grid = document.getElementById('imageGrid');
   tbody.innerHTML = '';
@@ -158,10 +187,14 @@ async function loadFiles() {
 
   const data = await res.json();
   state.files = data.items || [];
-  document.getElementById('count').textContent = `${state.currentFolder}: ${data.count} file(s)`;
+  const currentFolderLabel = state.folders.find((f) => f.name === state.currentFolder)?.label || state.currentFolder;
+  document.getElementById('count').textContent = `${currentFolderLabel}: ${data.count} file(s)`;
 
   for (const item of state.files) {
     const tr = document.createElement('tr');
+    tr.className = 'file-row';
+    tr.draggable = true;
+    tr.dataset.blobPath = item.name;
     const openHref = `/api/files/${encodePath(item.name)}`;
     const fileName = escapeHtml(shortName(item.name, state.currentFolder));
     const contentType = escapeHtml(item.content_type || "");
@@ -235,9 +268,91 @@ async function onFolderClick(event) {
   await loadFiles();
 }
 
+function onFileDragStart(event) {
+  const row = event.target.closest('tr[data-blob-path]');
+  if (!row) return;
+  state.dragBlobPath = row.dataset.blobPath || "";
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', state.dragBlobPath);
+  row.classList.add('dragging');
+  setMoveStatus('');
+}
+
+function onFileDragEnd(event) {
+  const row = event.target.closest('tr[data-blob-path]');
+  if (row) {
+    row.classList.remove('dragging');
+  }
+  clearDropTargets();
+}
+
+function onFolderDragOver(event) {
+  const button = event.target.closest('.folder-btn');
+  if (!button) return;
+  const folder = button.dataset.folder || "";
+  if (!folder || folder === ALL_FILES_KEY || !state.dragBlobPath) return;
+
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  clearDropTargets();
+  button.classList.add('drop-target');
+}
+
+function onFolderDragLeave(event) {
+  const button = event.target.closest('.folder-btn');
+  if (!button) return;
+  button.classList.remove('drop-target');
+}
+
+async function moveBlob(sourcePath, targetFolder) {
+  const normalizedSource = normalizePath(sourcePath);
+  const sourceTopFolder = normalizedSource.split('/')[0] || "";
+  if (!normalizedSource || !targetFolder) return;
+  if (sourceTopFolder === targetFolder) {
+    setMoveStatus(`File is already in ${targetFolder}.`);
+    return;
+  }
+
+  setMoveStatus(`Moving file to ${targetFolder}...`);
+  const form = new FormData();
+  form.append('source_path', normalizedSource);
+  form.append('target_folder', targetFolder);
+
+  try {
+    const res = await fetch('/api/move', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      setMoveStatus(data.detail || 'Move failed.', true);
+      return;
+    }
+    setMoveStatus(`Moved to ${targetFolder}.`);
+    await loadFolders();
+    await loadFiles();
+  } catch (err) {
+    setMoveStatus('Move failed due to network error.', true);
+  }
+}
+
+async function onFolderDrop(event) {
+  const button = event.target.closest('.folder-btn');
+  if (!button) return;
+  const targetFolder = button.dataset.folder || "";
+  if (!targetFolder || targetFolder === ALL_FILES_KEY) return;
+
+  event.preventDefault();
+  clearDropTargets();
+  const sourcePath = event.dataTransfer.getData('text/plain') || state.dragBlobPath;
+  await moveBlob(sourcePath, targetFolder);
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('uploadForm').addEventListener('submit', uploadFile);
   document.getElementById('folderList').addEventListener('click', onFolderClick);
+  document.querySelector('#fileTable tbody').addEventListener('dragstart', onFileDragStart);
+  document.querySelector('#fileTable tbody').addEventListener('dragend', onFileDragEnd);
+  document.getElementById('folderList').addEventListener('dragover', onFolderDragOver);
+  document.getElementById('folderList').addEventListener('dragleave', onFolderDragLeave);
+  document.getElementById('folderList').addEventListener('drop', onFolderDrop);
   document.getElementById('refreshBtn').addEventListener('click', async () => {
     await loadFolders();
     await loadFiles();

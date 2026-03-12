@@ -193,6 +193,19 @@ def _is_image(content_type: Optional[str], blob_name: str) -> bool:
     return suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 
 
+def _clone_content_settings(source: Optional[ContentSettings]) -> ContentSettings:
+    if not source:
+        return ContentSettings(content_type="application/octet-stream")
+    return ContentSettings(
+        content_type=source.content_type or "application/octet-stream",
+        content_encoding=source.content_encoding,
+        content_language=source.content_language,
+        content_disposition=source.content_disposition,
+        cache_control=source.cache_control,
+        content_md5=source.content_md5,
+    )
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(BASE_DIR / "templates" / "index.html")
@@ -326,6 +339,53 @@ async def upload_file(
         uploaded.append({"blob_name": blob_name, "size": len(data), "content_type": content_type})
 
     return {"ok": True, "uploaded": uploaded, "count": len(uploaded)}
+
+
+@app.post("/api/move")
+def move_file(
+    request: Request,
+    source_path: str = Form(...),
+    target_folder: str = Form(...),
+):
+    user = _current_user(request)
+    scope = _access_scope(user)
+    source_name = _normalize_path(source_path)
+    destination_folder = _normalize_path(target_folder)
+    if not source_name:
+        raise HTTPException(status_code=400, detail="Source file is required")
+    if not destination_folder:
+        raise HTTPException(status_code=400, detail="Target folder is required")
+    if not _can_read_blob(scope, source_name):
+        raise HTTPException(status_code=403, detail="You cannot move this file")
+    if not _can_write_folder(scope, destination_folder):
+        raise HTTPException(status_code=403, detail="You cannot move files into this folder")
+
+    target_name = _safe_blob_name(Path(source_name).name, destination_folder)
+    if source_name.lower() == target_name.lower():
+        return {"ok": True, "moved": False, "source_path": source_name, "target_path": target_name}
+
+    container = _container_client()
+    source_blob = container.get_blob_client(source_name)
+    target_blob = container.get_blob_client(target_name)
+
+    try:
+        source_props = source_blob.get_blob_properties()
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Source file not found") from exc
+
+    try:
+        data = source_blob.download_blob().readall()
+        target_blob.upload_blob(
+            data=data,
+            overwrite=True,
+            content_settings=_clone_content_settings(source_props.content_settings),
+            metadata=source_props.metadata,
+        )
+        source_blob.delete_blob()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to move file") from exc
+
+    return {"ok": True, "moved": True, "source_path": source_name, "target_path": target_name}
 
 
 @app.get("/api/files/{blob_path:path}")

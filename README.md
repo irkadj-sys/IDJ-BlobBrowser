@@ -6,6 +6,7 @@ Private family file manager for Azure Blob Storage.
 - Secure sign-in with Microsoft Entra ID (manual allow-list access)
 - Upload multiple files to a private Azure Blob container
 - Folder-based browsing (left pane folders, right pane files)
+- Drag-and-drop file move between visible folders
 - Image gallery with recent-file limit selector (5/10/25/50)
 
 ## Security model (simple + secure)
@@ -16,6 +17,7 @@ Private family file manager for Azure Blob Storage.
 - Non-admin users:
   - Read: `<username>/` and `shared/`
   - Upload: `<username>/` and `shared/`
+  - Move files between `<username>/` and `shared/`
 - Admin users (`ADMIN_USER_EMAILS`) can read/upload all folders
 
 ## Run locally
