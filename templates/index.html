@@ -65,6 +65,12 @@
       <h3>Browse Files</h3>
       <div class="row" style="margin-bottom: 10px;">
         <button id="refreshBtn" type="button">Refresh</button>
+        <label for="moveConflictStrategy" class="muted">Move on conflict</label>
+        <select id="moveConflictStrategy">
+          <option value="keep_both" selected>Keep both (Recommended)</option>
+          <option value="replace">Replace existing</option>
+          <option value="skip">Skip move</option>
+        </select>
       </div>
       <form id="createFolderForm" class="row" style="margin-bottom: 10px;">
         <input type="text" id="newFolderName" placeholder="New subfolder name" />

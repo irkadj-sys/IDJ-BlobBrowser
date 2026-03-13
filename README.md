@@ -9,7 +9,8 @@ Private family file manager for Azure Blob Storage.
 - Direct-to-Blob browser upload via short-lived SAS (high-performance path)
 - Folder-tree browsing (left pane hierarchy, right pane files for selected folder only)
 - Create subfolders from the UI
-- Drag-and-drop file move between visible folders
+- Drag-and-drop file move between visible folders with conflict strategies
+- Background image thumbnail generation and cached gallery thumbnails
 - Image gallery with recent-file limit selector (5/10/25/50)
 
 ## Security model (simple + secure)
@@ -74,6 +75,10 @@ Open http://localhost:8000
 - App Service Managed Identity should have Blob roles that allow:
   - Upload/read/write data (for app operations)
   - User delegation key generation (for SAS issuance)
+
+## Thumbnail notes
+- Thumbnails are generated for image files and cached in hidden `.thumbs/` folders.
+- Video thumbnails are not generated yet in this version.
 
 ## Deploy (App Service)
 - Azure setup/security baseline: [docs/AZURE_SETUP.md](docs/AZURE_SETUP.md)

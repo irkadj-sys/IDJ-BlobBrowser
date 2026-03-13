@@ -73,6 +73,11 @@ function setMoveStatus(message, isError = false) {
   el.style.color = isError ? '#b91c1c' : '';
 }
 
+function selectedMoveConflictStrategy() {
+  const el = document.getElementById('moveConflictStrategy');
+  return el?.value || 'keep_both';
+}
+
 function setCreateStatus(message, isError = false) {
   const el = document.getElementById('createFolderStatus');
   if (!el) return;
@@ -214,7 +219,7 @@ function renderGallery() {
     const card = document.createElement('div');
     card.className = 'thumb';
     const openHref = `/api/files/${encodePath(item.name)}`;
-    const imgSrc = `/api/images/${encodePath(item.name)}`;
+    const imgSrc = `/api/thumbs/${encodePath(item.name)}`;
     const fileName = escapeHtml(shortName(item.name, state.currentFolder));
     card.innerHTML = `<a href="${openHref}" target="_blank" rel="noopener noreferrer"><img src="${imgSrc}" alt="${fileName}" /></a><div class="name">${fileName}</div>`;
     grid.appendChild(card);
@@ -348,6 +353,7 @@ async function uploadSingleFileHighPerformance(file, folder, statusEl) {
         statusEl.textContent = `Uploading ${file.name}: ${pct}%`;
       },
     });
+    await enqueueThumbnailJob(sasInfo.blob_name, file.type || 'application/octet-stream');
     return;
   }
 
@@ -402,6 +408,21 @@ async function uploadSingleFileInChunks(file, folder, statusEl) {
   }
   if (!completeRes.ok) {
     throw new Error(completeData?.detail || `Finalize failed for ${file.name}`);
+  }
+  await enqueueThumbnailJob(completeData?.blob_name || `${normalizePath(folder)}/${file.name}`, contentType);
+}
+
+async function enqueueThumbnailJob(blobName, contentType) {
+  if (!contentType?.toLowerCase().startsWith('image/')) {
+    return;
+  }
+  const form = new FormData();
+  form.append('blob_name', blobName);
+  form.append('content_type', contentType);
+  try {
+    await fetch('/api/thumbs/enqueue', { method: 'POST', body: form });
+  } catch (err) {
+    // Ignore non-blocking thumbnail queue failures.
   }
 }
 
@@ -507,6 +528,7 @@ async function moveBlob(sourcePath, targetFolder) {
   const form = new FormData();
   form.append('source_path', normalizedSource);
   form.append('target_folder', targetFolder);
+  form.append('conflict_strategy', selectedMoveConflictStrategy());
 
   try {
     const res = await fetch('/api/move', { method: 'POST', body: form });
@@ -515,7 +537,15 @@ async function moveBlob(sourcePath, targetFolder) {
       setMoveStatus(data.detail || 'Move failed.', true);
       return;
     }
-    setMoveStatus(`Moved to ${targetFolder}.`);
+    if (data.skipped) {
+      const skippedName = data.target_path?.split('/').pop() || 'target exists';
+      setMoveStatus(`Skipped move: ${skippedName} already exists.`);
+    } else if (data.moved) {
+      const finalName = data.target_path?.split('/').pop() || '';
+      setMoveStatus(`Moved to ${targetFolder}${finalName ? ` as ${finalName}` : ''}.`);
+    } else {
+      setMoveStatus('No changes made.');
+    }
     await loadFolders();
     await loadFiles();
   } catch (err) {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import io
 import json
 import os
 import re
@@ -12,9 +13,10 @@ from urllib.parse import urlparse
 
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobBlock, BlobSasPermissions, BlobServiceClient, ContentSettings, generate_blob_sas
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
@@ -222,6 +224,29 @@ def _is_folder_marker(blob_name: str) -> bool:
     return marker_name in {".folder", ".keep"}
 
 
+def _has_hidden_segment(blob_name: str) -> bool:
+    parts = [part.lower() for part in _normalize_path(blob_name).split("/") if part]
+    return any(part in {".thumbs", ".thumbnails"} for part in parts)
+
+
+def _thumbnail_blob_name(blob_name: str) -> str:
+    normalized = _normalize_path(blob_name)
+    parts = normalized.split("/")
+    parent = "/".join(parts[:-1])
+    filename = parts[-1]
+    if parent:
+        return f"{parent}/.thumbs/{filename}.jpg"
+    return f".thumbs/{filename}.jpg"
+
+
+def _blob_exists(blob_client) -> bool:
+    try:
+        blob_client.get_blob_properties()
+        return True
+    except Exception:
+        return False
+
+
 def _max_upload_mb() -> int:
     return int(_env("MAX_UPLOAD_MB", "2048") or "2048")
 
@@ -288,6 +313,32 @@ def _build_blob_write_sas_url(blob_name: str) -> tuple[str, str]:
     return sas_url, expiry.astimezone(timezone.utc).isoformat()
 
 
+def _generate_thumbnail_bytes(image_bytes: bytes, max_px: int = 360) -> bytes:
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        rgb = img.convert("RGB")
+        rgb.thumbnail((max_px, max_px))
+        out = io.BytesIO()
+        rgb.save(out, format="JPEG", quality=82, optimize=True)
+        return out.getvalue()
+
+
+def _ensure_thumbnail_blob(blob_name: str) -> None:
+    normalized = _normalize_path(blob_name)
+    container = _container_client()
+    source_blob = container.get_blob_client(normalized)
+    thumb_blob_name = _thumbnail_blob_name(normalized)
+    thumb_blob = container.get_blob_client(thumb_blob_name)
+    if _blob_exists(thumb_blob):
+        return
+    source_data = source_blob.download_blob().readall()
+    thumb_data = _generate_thumbnail_bytes(source_data)
+    thumb_blob.upload_blob(
+        thumb_data,
+        overwrite=True,
+        content_settings=ContentSettings(content_type="image/jpeg"),
+    )
+
+
 def _folder_sort_key(folder_path: str) -> tuple[str, ...]:
     return tuple(part.lower() for part in _normalize_path(folder_path).split("/"))
 
@@ -328,7 +379,7 @@ def list_folders(request: Request):
     discovered: set[str] = set()
     for blob in container.list_blobs():
         name = _normalize_path(blob.name)
-        if not name or not _can_read_blob(scope, name):
+        if not name or not _can_read_blob(scope, name) or _has_hidden_segment(name):
             continue
         parts = name.split("/")
         if len(parts) <= 1:
@@ -383,6 +434,8 @@ def list_files(request: Request, prefix: str = "", direct_only: bool = True):
             if not _can_read_blob(scope, blob.name):
                 continue
             if _is_folder_marker(blob.name):
+                continue
+            if _has_hidden_segment(blob.name):
                 continue
             if direct_only:
                 full_name = _normalize_path(blob.name)
@@ -540,6 +593,28 @@ def complete_chunked_upload(
     return {"ok": True, "blob_name": blob_name, "size": props.size, "content_type": content_type}
 
 
+@app.post("/api/thumbs/enqueue")
+def enqueue_thumbnail(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    blob_name: str = Form(...),
+    content_type: str = Form(default=""),
+):
+    user = _current_user(request)
+    scope = _access_scope(user)
+    normalized = _normalize_path(blob_name)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Blob name is required")
+    if not _can_read_blob(scope, normalized):
+        raise HTTPException(status_code=403, detail="You cannot access this file")
+    if content_type and not content_type.lower().startswith("image/"):
+        return {"ok": True, "queued": False}
+    if not _is_image(content_type, normalized):
+        return {"ok": True, "queued": False}
+    background_tasks.add_task(_ensure_thumbnail_blob, normalized)
+    return {"ok": True, "queued": True}
+
+
 @app.post("/api/folders/create")
 def create_folder(
     request: Request,
@@ -589,6 +664,7 @@ def move_file(
     request: Request,
     source_path: str = Form(...),
     target_folder: str = Form(...),
+    conflict_strategy: str = Form(default="keep_both"),
 ):
     user = _current_user(request)
     scope = _access_scope(user)
@@ -602,8 +678,12 @@ def move_file(
         raise HTTPException(status_code=403, detail="You cannot move this file")
     if not _can_write_folder(scope, destination_folder):
         raise HTTPException(status_code=403, detail="You cannot move files into this folder")
+    strategy = conflict_strategy.strip().lower()
+    if strategy not in {"replace", "keep_both", "skip"}:
+        raise HTTPException(status_code=400, detail="Invalid conflict strategy")
 
-    target_name = _safe_blob_name(Path(source_name).name, destination_folder)
+    source_filename = Path(source_name).name
+    target_name = _safe_blob_name(source_filename, destination_folder)
     if source_name.lower() == target_name.lower():
         return {"ok": True, "moved": False, "source_path": source_name, "target_path": target_name}
 
@@ -616,11 +696,35 @@ def move_file(
     except Exception as exc:
         raise HTTPException(status_code=404, detail="Source file not found") from exc
 
+    target_exists = _blob_exists(target_blob)
+    if target_exists and strategy == "skip":
+        return {
+            "ok": True,
+            "moved": False,
+            "skipped": True,
+            "source_path": source_name,
+            "target_path": target_name,
+            "conflict_strategy": strategy,
+        }
+    if target_exists and strategy == "keep_both":
+        stem = Path(source_filename).stem
+        suffix = Path(source_filename).suffix
+        index = 1
+        while True:
+            candidate_filename = f"{stem} ({index}){suffix}"
+            candidate_name = _safe_blob_name(candidate_filename, destination_folder)
+            candidate_blob = container.get_blob_client(candidate_name)
+            if not _blob_exists(candidate_blob):
+                target_name = candidate_name
+                target_blob = candidate_blob
+                break
+            index += 1
+
     try:
         source_stream = source_blob.download_blob(max_concurrency=4)
         target_blob.upload_blob(
             data=source_stream.chunks(),
-            overwrite=True,
+            overwrite=(strategy == "replace"),
             content_settings=_clone_content_settings(source_props.content_settings),
             metadata=source_props.metadata,
         )
@@ -628,7 +732,13 @@ def move_file(
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Failed to move file") from exc
 
-    return {"ok": True, "moved": True, "source_path": source_name, "target_path": target_name}
+    return {
+        "ok": True,
+        "moved": True,
+        "source_path": source_name,
+        "target_path": target_name,
+        "conflict_strategy": strategy,
+    }
 
 
 @app.get("/api/files/{blob_path:path}")
@@ -654,6 +764,46 @@ def download_file(request: Request, blob_path: str):
         media_type=content_type,
         headers={"Content-Disposition": f'inline; filename="{Path(blob_path).name}"'},
     )
+
+
+@app.get("/api/thumbs/{blob_path:path}")
+def view_thumbnail(request: Request, blob_path: str):
+    user = _current_user(request)
+    scope = _access_scope(user)
+    normalized = _normalize_path(blob_path)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Missing blob path")
+    if not _can_read_blob(scope, normalized):
+        raise HTTPException(status_code=403, detail="You cannot access this image")
+
+    container = _container_client()
+    source_blob = container.get_blob_client(normalized)
+    try:
+        source_props = source_blob.get_blob_properties()
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Image not found") from exc
+
+    source_content_type = (source_props.content_settings.content_type if source_props.content_settings else None) or ""
+    if not _is_image(source_content_type, normalized):
+        raise HTTPException(status_code=400, detail="Not an image")
+
+    thumb_blob_name = _thumbnail_blob_name(normalized)
+    thumb_blob = container.get_blob_client(thumb_blob_name)
+    if _blob_exists(thumb_blob):
+        return StreamingResponse(thumb_blob.download_blob().chunks(), media_type="image/jpeg")
+
+    try:
+        source_bytes = source_blob.download_blob().readall()
+        thumb_bytes = _generate_thumbnail_bytes(source_bytes)
+        thumb_blob.upload_blob(
+            thumb_bytes,
+            overwrite=True,
+            content_settings=ContentSettings(content_type="image/jpeg"),
+        )
+        return StreamingResponse(io.BytesIO(thumb_bytes), media_type="image/jpeg")
+    except Exception:
+        # Fallback to full image stream if thumbnail processing fails.
+        return StreamingResponse(source_blob.download_blob().chunks(), media_type=source_content_type or "image/*")
 
 
 @app.get("/api/images/{blob_path:path}")
