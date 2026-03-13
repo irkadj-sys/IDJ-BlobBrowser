@@ -28,7 +28,7 @@
     .browser-split { display: grid; grid-template-columns: 220px 1fr; gap: 12px; align-items: start; }
     .folder-pane { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #fbfdff; min-height: 320px; }
     .folder-list { display: flex; flex-direction: column; gap: 6px; }
-    .folder-btn { width: 100%; text-align: left; background: white; color: var(--text); border: 1px solid var(--line); }
+    .folder-btn { width: 100%; text-align: left; background: white; color: var(--text); border: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .folder-btn.active { background: #e0f2fe; border-color: #7dd3fc; }
     .folder-btn.drop-target { border-color: #0e7490; background: #cffafe; }
     .file-pane { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; overflow: auto; }
@@ -66,6 +66,12 @@
       <div class="row" style="margin-bottom: 10px;">
         <button id="refreshBtn" type="button">Refresh</button>
       </div>
+      <form id="createFolderForm" class="row" style="margin-bottom: 10px;">
+        <input type="text" id="newFolderName" placeholder="New subfolder name" />
+        <button id="createFolderBtn" type="submit">Create Folder</button>
+        <span id="createFolderHint" class="muted"></span>
+      </form>
+      <div id="createFolderStatus" class="muted" style="margin-bottom: 10px;"></div>
       <div class="browser-split">
         <div class="folder-pane">
           <div class="muted" style="margin-bottom: 8px;">Folders</div>

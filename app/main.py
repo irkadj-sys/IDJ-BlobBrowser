@@ -66,7 +66,7 @@ def _user_folder_name(email: str) -> str:
 
 
 def _prefix_for_folder(folder: str) -> str:
-    clean = _normalize_path(folder).lower()
+    clean = _normalize_path(folder)
     return f"{clean}/" if clean else ""
 
 
@@ -113,6 +113,16 @@ def _can_write_folder(scope: Dict[str, Any], folder: str) -> bool:
     if scope["is_admin"]:
         return True
     return _path_allowed_for_prefixes(folder, scope["writable_folders"])
+
+
+def _can_create_subfolder(scope: Dict[str, Any], parent_folder: str) -> bool:
+    if scope["is_admin"]:
+        return True
+    parent = _normalize_path(parent_folder)
+    own = _normalize_path(scope["own_folder"])
+    if not parent or not own:
+        return False
+    return parent == own or parent.startswith(f"{own}/")
 
 
 def _parse_easy_auth_header(value: str) -> Dict[str, Any]:
@@ -206,6 +216,15 @@ def _clone_content_settings(source: Optional[ContentSettings]) -> ContentSetting
     )
 
 
+def _is_folder_marker(blob_name: str) -> bool:
+    marker_name = Path(_normalize_path(blob_name)).name.lower()
+    return marker_name in {".folder", ".keep"}
+
+
+def _folder_sort_key(folder_path: str) -> tuple[str, ...]:
+    return tuple(part.lower() for part in _normalize_path(folder_path).split("/"))
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(BASE_DIR / "templates" / "index.html")
@@ -232,31 +251,28 @@ def list_folders(request: Request):
     discovered: set[str] = set()
     for blob in container.list_blobs():
         name = _normalize_path(blob.name)
-        if not name or "/" not in name:
+        if not name or not _can_read_blob(scope, name):
             continue
-        top_level = name.split("/", 1)[0]
-        if scope["is_admin"] or _path_allowed_for_prefixes(top_level, scope["readable_folders"]):
-            discovered.add(top_level)
+        parts = name.split("/")
+        if len(parts) <= 1:
+            continue
+        for idx in range(1, len(parts)):
+            discovered.add("/".join(parts[:idx]))
 
-    if scope["is_admin"]:
-        folders = sorted(discovered)
-        for folder in [scope["own_folder"], scope["shared_folder"]]:
-            if folder and folder not in folders:
-                folders.append(folder)
-        folders.sort()
-    else:
-        folders = []
-        for folder in [scope["own_folder"], scope["shared_folder"]]:
-            if folder and folder not in folders:
-                folders.append(folder)
-        for folder in sorted(discovered):
-            if folder not in folders:
-                folders.append(folder)
+    for folder in [scope["own_folder"], scope["shared_folder"]]:
+        if folder:
+            discovered.add(folder)
+
+    folders = sorted(discovered, key=_folder_sort_key)
 
     items = [
         {
-            "name": folder,
+            "name": _normalize_path(folder),
+            "label": Path(_normalize_path(folder)).name or _normalize_path(folder),
+            "depth": max(len(_normalize_path(folder).split("/")) - 1, 0),
+            "parent": "/".join(_normalize_path(folder).split("/")[:-1]),
             "can_upload": scope["is_admin"] or _path_allowed_for_prefixes(folder, scope["writable_folders"]),
+            "can_create_subfolder": _can_create_subfolder(scope, folder),
         }
         for folder in folders
     ]
@@ -264,7 +280,7 @@ def list_folders(request: Request):
 
 
 @app.get("/api/files")
-def list_files(request: Request, prefix: str = ""):
+def list_files(request: Request, prefix: str = "", direct_only: bool = True):
     user = _current_user(request)
     scope = _access_scope(user)
     container = _container_client()
@@ -289,6 +305,16 @@ def list_files(request: Request, prefix: str = ""):
                 continue
             if not _can_read_blob(scope, blob.name):
                 continue
+            if _is_folder_marker(blob.name):
+                continue
+            if direct_only:
+                full_name = _normalize_path(blob.name)
+                if azure_prefix:
+                    relative = full_name[len(azure_prefix) :]
+                    if not relative or "/" in relative:
+                        continue
+                elif "/" in full_name:
+                    continue
             seen_names.add(blob.name)
             content_type = (blob.content_settings.content_type if blob.content_settings else "") or ""
             files.append(
@@ -339,6 +365,50 @@ async def upload_file(
         uploaded.append({"blob_name": blob_name, "size": len(data), "content_type": content_type})
 
     return {"ok": True, "uploaded": uploaded, "count": len(uploaded)}
+
+
+@app.post("/api/folders/create")
+def create_folder(
+    request: Request,
+    parent_folder: str = Form(...),
+    folder_name: str = Form(...),
+):
+    user = _current_user(request)
+    scope = _access_scope(user)
+
+    parent = _normalize_path(parent_folder)
+    raw_name = folder_name.strip()
+    if not parent:
+        raise HTTPException(status_code=400, detail="Parent folder is required")
+    if not raw_name:
+        raise HTTPException(status_code=400, detail="Folder name is required")
+    if "/" in raw_name or "\\" in raw_name:
+        raise HTTPException(status_code=400, detail="Folder name cannot include slashes")
+
+    if not _can_read_blob(scope, parent):
+        raise HTTPException(status_code=403, detail="You cannot access the parent folder")
+    if not _can_create_subfolder(scope, parent):
+        raise HTTPException(status_code=403, detail="You can only create folders under your own account folder")
+
+    safe_name = re.sub(r"[^A-Za-z0-9._ -]", "_", raw_name).strip().strip(".")
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Folder name has no valid characters")
+
+    new_folder = _normalize_path(f"{parent}/{safe_name}")
+    marker_blob = f"{new_folder}/.folder"
+
+    container = _container_client()
+    try:
+        container.upload_blob(
+            name=marker_blob,
+            data=b"",
+            overwrite=True,
+            content_settings=ContentSettings(content_type="application/octet-stream"),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to create folder") from exc
+
+    return {"ok": True, "folder_path": new_folder}
 
 
 @app.post("/api/move")

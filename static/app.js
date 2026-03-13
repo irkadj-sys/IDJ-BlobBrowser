@@ -27,8 +27,6 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-const ALL_FILES_KEY = "__all__";
-
 const state = {
   me: null,
   folders: [],
@@ -39,7 +37,7 @@ const state = {
 };
 
 function shortName(fullName, folder) {
-  if (!folder || folder === ALL_FILES_KEY) return fullName;
+  if (!folder) return fullName;
   const prefix = `${folder}/`;
   if (!fullName.startsWith(prefix)) return fullName;
   return fullName.slice(prefix.length);
@@ -47,6 +45,14 @@ function shortName(fullName, folder) {
 
 function folderLabel(folder) {
   return folder.label || folder.name;
+}
+
+function folderDepth(folder) {
+  return Number(folder.depth || 0);
+}
+
+function folderByName(name) {
+  return state.folders.find((folder) => folder.name === name);
 }
 
 function clearDropTargets() {
@@ -57,6 +63,13 @@ function clearDropTargets() {
 
 function setMoveStatus(message, isError = false) {
   const el = document.getElementById('moveStatus');
+  if (!el) return;
+  el.textContent = message;
+  el.style.color = isError ? '#b91c1c' : '';
+}
+
+function setCreateStatus(message, isError = false) {
+  const el = document.getElementById('createFolderStatus');
   if (!el) return;
   el.textContent = message;
   el.style.color = isError ? '#b91c1c' : '';
@@ -91,7 +104,9 @@ function renderFolderList() {
     if (folder.name === state.currentFolder) {
       btn.classList.add('active');
     }
+    btn.style.paddingLeft = `${10 + folderDepth(folder) * 18}px`;
     btn.dataset.folder = folder.name;
+    btn.title = folder.name;
     btn.textContent = folderLabel(folder);
     list.appendChild(btn);
   }
@@ -101,7 +116,7 @@ function renderUploadFolders() {
   const select = document.getElementById('uploadFolderSelect');
   select.innerHTML = '';
 
-  const uploadable = state.folders.filter((folder) => folder.can_upload && folder.name !== ALL_FILES_KEY);
+  const uploadable = state.folders.filter((folder) => folder.can_upload);
   for (const folder of uploadable) {
     const option = document.createElement('option');
     option.value = folder.name;
@@ -120,6 +135,28 @@ function renderUploadFolders() {
   }
 }
 
+function refreshCreateFolderControls() {
+  const input = document.getElementById('newFolderName');
+  const btn = document.getElementById('createFolderBtn');
+  const hint = document.getElementById('createFolderHint');
+  const selected = folderByName(state.currentFolder);
+  const canCreate = Boolean(selected && selected.can_create_subfolder);
+
+  input.disabled = !canCreate;
+  btn.disabled = !canCreate;
+  if (!selected) {
+    hint.textContent = 'Select a folder to create a subfolder.';
+    return;
+  }
+  if (canCreate) {
+    hint.textContent = `Create a subfolder under: ${selected.name}`;
+  } else if (state.me?.is_admin) {
+    hint.textContent = `Folder selected: ${selected.name}`;
+  } else {
+    hint.textContent = 'You can create folders only inside your own account folder.';
+  }
+}
+
 async function loadFolders() {
   const res = await fetch('/api/folders');
   if (!res.ok) {
@@ -129,9 +166,6 @@ async function loadFolders() {
 
   const data = await res.json();
   state.folders = data.items || [];
-  if (state.me?.is_admin) {
-    state.folders = [{ name: ALL_FILES_KEY, label: "(all files)", can_upload: false }, ...state.folders];
-  }
   const currentExists = state.folders.some((folder) => folder.name === state.currentFolder);
   if (!currentExists) {
     state.currentFolder = "";
@@ -141,6 +175,7 @@ async function loadFolders() {
   }
   renderFolderList();
   renderUploadFolders();
+  refreshCreateFolderControls();
 }
 
 function renderGallery() {
@@ -172,8 +207,7 @@ async function loadFiles() {
     return;
   }
 
-  const loadAll = prefix === ALL_FILES_KEY;
-  const url = loadAll ? '/api/files' : `/api/files?prefix=${encodeURIComponent(prefix)}`;
+  const url = `/api/files?prefix=${encodeURIComponent(prefix)}&direct_only=true`;
   const res = await fetch(url);
   const tbody = document.querySelector('#fileTable tbody');
   const grid = document.getElementById('imageGrid');
@@ -255,6 +289,43 @@ async function uploadFile(event) {
   }
 }
 
+async function createFolder(event) {
+  event.preventDefault();
+  const input = document.getElementById('newFolderName');
+  const folderName = input.value.trim();
+  const parentFolder = state.currentFolder;
+
+  setCreateStatus('');
+  if (!parentFolder) {
+    setCreateStatus('Select a parent folder first.', true);
+    return;
+  }
+  if (!folderName) {
+    setCreateStatus('Enter a folder name.', true);
+    return;
+  }
+
+  const form = new FormData();
+  form.append('parent_folder', parentFolder);
+  form.append('folder_name', folderName);
+
+  try {
+    const res = await fetch('/api/folders/create', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) {
+      setCreateStatus(data.detail || 'Folder creation failed.', true);
+      return;
+    }
+    input.value = '';
+    state.currentFolder = data.folder_path;
+    await loadFolders();
+    await loadFiles();
+    setCreateStatus(`Created folder: ${data.folder_path}`);
+  } catch (err) {
+    setCreateStatus('Folder creation failed due to network error.', true);
+  }
+}
+
 async function onFolderClick(event) {
   const button = event.target.closest('.folder-btn');
   if (!button) return;
@@ -265,6 +336,8 @@ async function onFolderClick(event) {
   state.currentFolder = folder;
   renderFolderList();
   renderUploadFolders();
+  refreshCreateFolderControls();
+  setCreateStatus('');
   await loadFiles();
 }
 
@@ -290,7 +363,8 @@ function onFolderDragOver(event) {
   const button = event.target.closest('.folder-btn');
   if (!button) return;
   const folder = button.dataset.folder || "";
-  if (!folder || folder === ALL_FILES_KEY || !state.dragBlobPath) return;
+  const folderNode = folderByName(folder);
+  if (!folder || !state.dragBlobPath || !folderNode || !folderNode.can_upload) return;
 
   event.preventDefault();
   event.dataTransfer.dropEffect = 'move';
@@ -306,9 +380,9 @@ function onFolderDragLeave(event) {
 
 async function moveBlob(sourcePath, targetFolder) {
   const normalizedSource = normalizePath(sourcePath);
-  const sourceTopFolder = normalizedSource.split('/')[0] || "";
+  const sourceParent = normalizedSource.includes('/') ? normalizedSource.substring(0, normalizedSource.lastIndexOf('/')) : "";
   if (!normalizedSource || !targetFolder) return;
-  if (sourceTopFolder === targetFolder) {
+  if (normalizePath(sourceParent) === normalizePath(targetFolder)) {
     setMoveStatus(`File is already in ${targetFolder}.`);
     return;
   }
@@ -337,7 +411,8 @@ async function onFolderDrop(event) {
   const button = event.target.closest('.folder-btn');
   if (!button) return;
   const targetFolder = button.dataset.folder || "";
-  if (!targetFolder || targetFolder === ALL_FILES_KEY) return;
+  const folderNode = folderByName(targetFolder);
+  if (!targetFolder || !folderNode || !folderNode.can_upload) return;
 
   event.preventDefault();
   clearDropTargets();
@@ -347,6 +422,7 @@ async function onFolderDrop(event) {
 
 window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('uploadForm').addEventListener('submit', uploadFile);
+  document.getElementById('createFolderForm').addEventListener('submit', createFolder);
   document.getElementById('folderList').addEventListener('click', onFolderClick);
   document.querySelector('#fileTable tbody').addEventListener('dragstart', onFileDragStart);
   document.querySelector('#fileTable tbody').addEventListener('dragend', onFileDragEnd);
