@@ -5,6 +5,7 @@ Private family file manager for Azure Blob Storage.
 ## Scope (v1)
 - Secure sign-in with Microsoft Entra ID (manual allow-list access)
 - Upload multiple files to a private Azure Blob container
+- Chunked upload for large files/videos
 - Folder-tree browsing (left pane hierarchy, right pane files for selected folder only)
 - Create subfolders from the UI
 - Drag-and-drop file move between visible folders
@@ -57,7 +58,8 @@ Open http://localhost:8000
 - `ADMIN_USER_EMAILS` comma-separated emails with admin access
 - `SHARED_FOLDER_NAME` shared folder name (default `shared`)
 - `LOCAL_DEV_USER_EMAIL` only for local testing when Easy Auth header is unavailable
-- `MAX_UPLOAD_MB` upload limit (default `50`)
+- `MAX_UPLOAD_MB` upload limit per file in MB (default `2048`, set `0` for no app limit)
+- `UPLOAD_CHUNK_MB` chunk size in MB for browser uploads (default `8`)
 
 ## Deploy (App Service)
 - Azure setup/security baseline: [docs/AZURE_SETUP.md](docs/AZURE_SETUP.md)

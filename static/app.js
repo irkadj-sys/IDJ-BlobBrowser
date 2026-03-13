@@ -27,6 +27,8 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+const DEFAULT_CHUNK_SIZE_BYTES = 8 * 1024 * 1024;
+
 const state = {
   me: null,
   folders: [],
@@ -34,6 +36,8 @@ const state = {
   galleryLimit: 5,
   files: [],
   dragBlobPath: "",
+  maxUploadMb: 2048,
+  uploadChunkBytes: DEFAULT_CHUNK_SIZE_BYTES,
 };
 
 function shortName(fullName, folder) {
@@ -84,6 +88,20 @@ async function loadMe() {
   state.me = await res.json();
   const roleText = state.me.is_admin ? "Admin" : "User";
   document.getElementById('user').textContent = `Signed in: ${state.me.name} (${state.me.email}) | ${roleText}`;
+}
+
+async function loadConfig() {
+  const res = await fetch('/api/config');
+  if (!res.ok) return;
+  const cfg = await res.json();
+  const maxUploadMb = Number(cfg.max_upload_mb);
+  const uploadChunkMb = Number(cfg.upload_chunk_mb);
+  if (Number.isFinite(maxUploadMb)) {
+    state.maxUploadMb = maxUploadMb;
+  }
+  if (Number.isFinite(uploadChunkMb) && uploadChunkMb > 0) {
+    state.uploadChunkBytes = uploadChunkMb * 1024 * 1024;
+  }
 }
 
 function renderFolderList() {
@@ -262,30 +280,82 @@ async function uploadFile(event) {
     return;
   }
 
-  const form = new FormData();
-  for (const file of fileInput.files) {
-    form.append('files', file);
-  }
-  form.append('folder', folderSelect.value);
-
   const btn = event.target.querySelector('button[type="submit"]');
   btn.disabled = true;
   status.textContent = 'Uploading...';
 
   try {
-    const res = await fetch('/api/upload', { method: 'POST', body: form });
-    const data = await res.json();
-    if (!res.ok) {
-      status.textContent = data.detail || 'Upload failed';
-    } else {
-      status.textContent = `Uploaded ${data.count} file(s) to ${folderSelect.value}`;
-      fileInput.value = '';
-      await loadFiles();
+    const files = Array.from(fileInput.files);
+    const maxBytes = state.maxUploadMb > 0 ? state.maxUploadMb * 1024 * 1024 : 0;
+    for (const file of files) {
+      if (maxBytes > 0 && file.size > maxBytes) {
+        throw new Error(`${file.name}: File too large. Max is ${state.maxUploadMb} MB`);
+      }
     }
+
+    let completed = 0;
+    for (const file of files) {
+      status.textContent = `Uploading ${file.name} (${completed + 1}/${files.length})...`;
+      await uploadSingleFileInChunks(file, folderSelect.value, status);
+      completed += 1;
+    }
+    status.textContent = `Uploaded ${completed} file(s) to ${folderSelect.value}`;
+    fileInput.value = '';
+    await loadFiles();
   } catch (err) {
-    status.textContent = 'Upload failed due to network error.';
+    status.textContent = err?.message || 'Upload failed due to network error.';
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function uploadSingleFileInChunks(file, folder, statusEl) {
+  const chunkSize = state.uploadChunkBytes || DEFAULT_CHUNK_SIZE_BYTES;
+  const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+  const contentType = file.type || 'application/octet-stream';
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const start = chunkIndex * chunkSize;
+    const end = Math.min(start + chunkSize, file.size);
+    const chunkBlob = file.slice(start, end);
+
+    const form = new FormData();
+    form.append('file', chunkBlob, file.name);
+    form.append('folder', folder);
+    form.append('original_name', file.name);
+    form.append('chunk_index', String(chunkIndex));
+    form.append('total_chunks', String(totalChunks));
+    form.append('file_size', String(file.size));
+
+    const res = await fetch('/api/upload/chunked', { method: 'POST', body: form });
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (e) {
+      data = null;
+    }
+    if (!res.ok) {
+      throw new Error(data?.detail || `Upload failed for ${file.name}`);
+    }
+    statusEl.textContent = `Uploading ${file.name}: chunk ${chunkIndex + 1}/${totalChunks}`;
+  }
+
+  const completeForm = new FormData();
+  completeForm.append('folder', folder);
+  completeForm.append('original_name', file.name);
+  completeForm.append('total_chunks', String(totalChunks));
+  completeForm.append('file_size', String(file.size));
+  completeForm.append('content_type', contentType);
+
+  const completeRes = await fetch('/api/upload/chunked/complete', { method: 'POST', body: completeForm });
+  let completeData = null;
+  try {
+    completeData = await completeRes.json();
+  } catch (e) {
+    completeData = null;
+  }
+  if (!completeRes.ok) {
+    throw new Error(completeData?.detail || `Finalize failed for ${file.name}`);
   }
 }
 
@@ -438,6 +508,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     renderGallery();
   });
   await loadMe();
+  await loadConfig();
   await loadFolders();
   await loadFiles();
 });

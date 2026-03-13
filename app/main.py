@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.storage.blob import BlobBlock, BlobServiceClient, ContentSettings
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -221,6 +221,31 @@ def _is_folder_marker(blob_name: str) -> bool:
     return marker_name in {".folder", ".keep"}
 
 
+def _max_upload_mb() -> int:
+    return int(_env("MAX_UPLOAD_MB", "2048") or "2048")
+
+
+def _max_upload_bytes() -> int:
+    value = _max_upload_mb()
+    return value * 1024 * 1024 if value > 0 else 0
+
+
+def _max_chunk_bytes() -> int:
+    value = int(_env("UPLOAD_CHUNK_MB", "8") or "8")
+    return value * 1024 * 1024 if value > 0 else 8 * 1024 * 1024
+
+
+def _validate_total_file_size(file_size_bytes: int) -> None:
+    max_bytes = _max_upload_bytes()
+    if max_bytes > 0 and file_size_bytes > max_bytes:
+        max_mb = max_bytes // (1024 * 1024)
+        raise HTTPException(status_code=413, detail=f"File too large. Max is {max_mb} MB")
+
+
+def _chunk_block_id(index: int) -> str:
+    return base64.b64encode(f"{index:08d}".encode("ascii")).decode("ascii")
+
+
 def _folder_sort_key(folder_path: str) -> tuple[str, ...]:
     return tuple(part.lower() for part in _normalize_path(folder_path).split("/"))
 
@@ -239,6 +264,15 @@ def me(request: Request):
         "is_admin": scope["is_admin"],
         "own_folder": scope["own_folder"],
         "shared_folder": scope["shared_folder"],
+    }
+
+
+@app.get("/api/config")
+def config(request: Request):
+    _current_user(request)
+    return {
+        "max_upload_mb": _max_upload_mb(),
+        "upload_chunk_mb": _max_chunk_bytes() // (1024 * 1024),
     }
 
 
@@ -345,14 +379,11 @@ async def upload_file(
     if not _can_write_folder(scope, upload_folder):
         raise HTTPException(status_code=403, detail="You can only upload to your own folder or shared folder")
 
-    max_mb = int(_env("MAX_UPLOAD_MB", "50") or "50")
     container = _container_client()
     uploaded = []
     for file in files:
         data = await file.read()
-        size_mb = len(data) / (1024 * 1024)
-        if size_mb > max_mb:
-            raise HTTPException(status_code=413, detail=f"{file.filename}: File too large. Max is {max_mb} MB")
+        _validate_total_file_size(len(data))
 
         blob_name = _safe_blob_name(file.filename or "upload.bin", upload_folder)
         content_type = file.content_type or "application/octet-stream"
@@ -365,6 +396,78 @@ async def upload_file(
         uploaded.append({"blob_name": blob_name, "size": len(data), "content_type": content_type})
 
     return {"ok": True, "uploaded": uploaded, "count": len(uploaded)}
+
+
+@app.post("/api/upload/chunked")
+async def upload_file_chunk(
+    request: Request,
+    file: UploadFile = File(...),
+    folder: str = Form(default=""),
+    original_name: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    file_size: int = Form(default=0),
+):
+    user = _current_user(request)
+    scope = _access_scope(user)
+    upload_folder = _normalize_path(folder)
+    if not upload_folder:
+        raise HTTPException(status_code=400, detail="Folder is required")
+    if not _can_write_folder(scope, upload_folder):
+        raise HTTPException(status_code=403, detail="You can only upload to your own folder or shared folder")
+    if total_chunks <= 0:
+        raise HTTPException(status_code=400, detail="Invalid total_chunks")
+    if chunk_index < 0 or chunk_index >= total_chunks:
+        raise HTTPException(status_code=400, detail="Invalid chunk_index")
+
+    if file_size > 0:
+        _validate_total_file_size(file_size)
+
+    chunk_data = await file.read()
+    if len(chunk_data) > _max_chunk_bytes():
+        max_chunk_mb = _max_chunk_bytes() // (1024 * 1024)
+        raise HTTPException(status_code=413, detail=f"Chunk too large. Max chunk is {max_chunk_mb} MB")
+
+    blob_name = _safe_blob_name(original_name or file.filename or "upload.bin", upload_folder)
+    block_id = _chunk_block_id(chunk_index)
+    container = _container_client()
+    blob = container.get_blob_client(blob_name)
+    blob.stage_block(block_id=block_id, data=chunk_data)
+    return {"ok": True, "blob_name": blob_name, "chunk_index": chunk_index, "total_chunks": total_chunks}
+
+
+@app.post("/api/upload/chunked/complete")
+def complete_chunked_upload(
+    request: Request,
+    folder: str = Form(default=""),
+    original_name: str = Form(...),
+    total_chunks: int = Form(...),
+    file_size: int = Form(default=0),
+    content_type: str = Form(default="application/octet-stream"),
+):
+    user = _current_user(request)
+    scope = _access_scope(user)
+    upload_folder = _normalize_path(folder)
+    if not upload_folder:
+        raise HTTPException(status_code=400, detail="Folder is required")
+    if not _can_write_folder(scope, upload_folder):
+        raise HTTPException(status_code=403, detail="You can only upload to your own folder or shared folder")
+    if total_chunks <= 0:
+        raise HTTPException(status_code=400, detail="Invalid total_chunks")
+
+    if file_size > 0:
+        _validate_total_file_size(file_size)
+
+    blob_name = _safe_blob_name(original_name or "upload.bin", upload_folder)
+    block_list = [BlobBlock(block_id=_chunk_block_id(index)) for index in range(total_chunks)]
+    container = _container_client()
+    blob = container.get_blob_client(blob_name)
+    blob.commit_block_list(
+        block_list,
+        content_settings=ContentSettings(content_type=content_type or "application/octet-stream"),
+    )
+    props = blob.get_blob_properties()
+    return {"ok": True, "blob_name": blob_name, "size": props.size, "content_type": content_type}
 
 
 @app.post("/api/folders/create")
