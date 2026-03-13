@@ -38,6 +38,7 @@ const state = {
   dragBlobPath: "",
   maxUploadMb: 2048,
   uploadChunkBytes: DEFAULT_CHUNK_SIZE_BYTES,
+  uploadConcurrency: 4,
 };
 
 function shortName(fullName, folder) {
@@ -96,11 +97,15 @@ async function loadConfig() {
   const cfg = await res.json();
   const maxUploadMb = Number(cfg.max_upload_mb);
   const uploadChunkMb = Number(cfg.upload_chunk_mb);
+  const uploadConcurrency = Number(cfg.upload_concurrency);
   if (Number.isFinite(maxUploadMb)) {
     state.maxUploadMb = maxUploadMb;
   }
   if (Number.isFinite(uploadChunkMb) && uploadChunkMb > 0) {
     state.uploadChunkBytes = uploadChunkMb * 1024 * 1024;
+  }
+  if (Number.isFinite(uploadConcurrency) && uploadConcurrency > 0) {
+    state.uploadConcurrency = uploadConcurrency;
   }
 }
 
@@ -296,7 +301,7 @@ async function uploadFile(event) {
     let completed = 0;
     for (const file of files) {
       status.textContent = `Uploading ${file.name} (${completed + 1}/${files.length})...`;
-      await uploadSingleFileInChunks(file, folderSelect.value, status);
+      await uploadSingleFileHighPerformance(file, folderSelect.value, status);
       completed += 1;
     }
     status.textContent = `Uploaded ${completed} file(s) to ${folderSelect.value}`;
@@ -307,6 +312,47 @@ async function uploadFile(event) {
   } finally {
     btn.disabled = false;
   }
+}
+
+async function requestUploadSas(file, folder) {
+  const form = new FormData();
+  form.append('folder', folder);
+  form.append('original_name', file.name);
+  form.append('file_size', String(file.size));
+
+  const res = await fetch('/api/upload/sas', { method: 'POST', body: form });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (e) {
+    data = null;
+  }
+  if (!res.ok) {
+    throw new Error(data?.detail || `Failed to create upload URL for ${file.name}`);
+  }
+  return data;
+}
+
+async function uploadSingleFileHighPerformance(file, folder, statusEl) {
+  const sasInfo = await requestUploadSas(file, folder);
+  if (window.azblob?.BlockBlobClient) {
+    const blockBlobClient = new window.azblob.BlockBlobClient(sasInfo.upload_url);
+    await blockBlobClient.uploadBrowserData(file, {
+      blockSize: state.uploadChunkBytes,
+      maxSingleShotSize: state.uploadChunkBytes,
+      concurrency: state.uploadConcurrency,
+      blobHTTPHeaders: { blobContentType: file.type || 'application/octet-stream' },
+      onProgress: (ev) => {
+        const loaded = Number(ev.loadedBytes || 0);
+        const pct = file.size > 0 ? Math.floor((loaded / file.size) * 100) : 100;
+        statusEl.textContent = `Uploading ${file.name}: ${pct}%`;
+      },
+    });
+    return;
+  }
+
+  // Fallback path if azblob SDK fails to load in browser.
+  await uploadSingleFileInChunks(file, folder, statusEl);
 }
 
 async function uploadSingleFileInChunks(file, folder, statusEl) {

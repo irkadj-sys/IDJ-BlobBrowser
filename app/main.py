@@ -5,12 +5,13 @@ import binascii
 import json
 import os
 import re
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+from urllib.parse import urlparse
 
 from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobBlock, BlobServiceClient, ContentSettings
+from azure.storage.blob import BlobBlock, BlobSasPermissions, BlobServiceClient, ContentSettings, generate_blob_sas
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -235,6 +236,25 @@ def _max_chunk_bytes() -> int:
     return value * 1024 * 1024 if value > 0 else 8 * 1024 * 1024
 
 
+def _upload_concurrency() -> int:
+    value = int(_env("UPLOAD_CONCURRENCY", "4") or "4")
+    return value if value > 0 else 4
+
+
+def _sas_expiry_minutes() -> int:
+    value = int(_env("SAS_UPLOAD_EXPIRY_MINUTES", "20") or "20")
+    return value if value > 0 else 20
+
+
+def _storage_account_name() -> str:
+    account_url = _required_env("AZURE_STORAGE_ACCOUNT_URL")
+    host = urlparse(account_url).netloc
+    account_name = host.split(".")[0]
+    if not account_name:
+        raise RuntimeError("Unable to resolve storage account name from AZURE_STORAGE_ACCOUNT_URL")
+    return account_name
+
+
 def _validate_total_file_size(file_size_bytes: int) -> None:
     max_bytes = _max_upload_bytes()
     if max_bytes > 0 and file_size_bytes > max_bytes:
@@ -244,6 +264,28 @@ def _validate_total_file_size(file_size_bytes: int) -> None:
 
 def _chunk_block_id(index: int) -> str:
     return base64.b64encode(f"{index:08d}".encode("ascii")).decode("ascii")
+
+
+def _build_blob_write_sas_url(blob_name: str) -> tuple[str, str]:
+    service = _blob_service_client()
+    container_name = _required_env("AZURE_STORAGE_CONTAINER")
+    account_name = _storage_account_name()
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(minutes=5)
+    expiry = now + timedelta(minutes=_sas_expiry_minutes())
+    delegation_key = service.get_user_delegation_key(key_start_time=start, key_expiry_time=expiry)
+    sas_token = generate_blob_sas(
+        account_name=account_name,
+        container_name=container_name,
+        blob_name=blob_name,
+        user_delegation_key=delegation_key,
+        permission=BlobSasPermissions(create=True, write=True),
+        start=start,
+        expiry=expiry,
+    )
+    blob_url = service.get_container_client(container_name).get_blob_client(blob_name).url
+    sas_url = f"{blob_url}?{sas_token}"
+    return sas_url, expiry.astimezone(timezone.utc).isoformat()
 
 
 def _folder_sort_key(folder_path: str) -> tuple[str, ...]:
@@ -273,6 +315,7 @@ def config(request: Request):
     return {
         "max_upload_mb": _max_upload_mb(),
         "upload_chunk_mb": _max_chunk_bytes() // (1024 * 1024),
+        "upload_concurrency": _upload_concurrency(),
     }
 
 
@@ -396,6 +439,33 @@ async def upload_file(
         uploaded.append({"blob_name": blob_name, "size": len(data), "content_type": content_type})
 
     return {"ok": True, "uploaded": uploaded, "count": len(uploaded)}
+
+
+@app.post("/api/upload/sas")
+def upload_file_sas(
+    request: Request,
+    folder: str = Form(default=""),
+    original_name: str = Form(...),
+    file_size: int = Form(default=0),
+):
+    user = _current_user(request)
+    scope = _access_scope(user)
+    upload_folder = _normalize_path(folder)
+    if not upload_folder:
+        raise HTTPException(status_code=400, detail="Folder is required")
+    if not _can_write_folder(scope, upload_folder):
+        raise HTTPException(status_code=403, detail="You can only upload to your own folder or shared folder")
+
+    if file_size > 0:
+        _validate_total_file_size(file_size)
+
+    blob_name = _safe_blob_name(original_name or "upload.bin", upload_folder)
+    try:
+        sas_url, expires_on = _build_blob_write_sas_url(blob_name)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to create upload SAS") from exc
+
+    return {"ok": True, "blob_name": blob_name, "upload_url": sas_url, "expires_on": expires_on}
 
 
 @app.post("/api/upload/chunked")
