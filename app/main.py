@@ -547,9 +547,9 @@ def move_file(
         raise HTTPException(status_code=404, detail="Source file not found") from exc
 
     try:
-        data = source_blob.download_blob().readall()
+        source_stream = source_blob.download_blob(max_concurrency=4)
         target_blob.upload_blob(
-            data=data,
+            data=source_stream.chunks(),
             overwrite=True,
             content_settings=_clone_content_settings(source_props.content_settings),
             metadata=source_props.metadata,
